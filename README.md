@@ -1,15 +1,13 @@
-# Real Sparkle?
+# Real Sparkle? (Work in progress)
 
 A 2D pixel-style rooftop endless runner built with Python and Pygame.
 
-Current Features:
+## Current Features:
 - Infinite procedural platform generation
 - Double jump
 - Fast-fall mechanics
 - Sliding movement system
 - Multi-layer rooftop environment
-
-Work in progress.
 
 
 
