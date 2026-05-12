@@ -68,15 +68,20 @@ player_rect=player.get_rect(midbottom=(player_x,start_rect.top))
 vel_y=0
 gravity=0.8
 jump_power=-16
-return_vel=8
 
 jump_count=2
 
 on_ground=False
 
 platform_speed=5
-target_speed=5
+speed_goal=5
 speed_up_every=1000 #speed up
+
+slide_x=500 #slide distance
+target_x=player_x
+slide_timer=0
+slide_duration=15
+fast_land=False
 
 while True:
     for event in pygame.event.get():
@@ -89,6 +94,15 @@ while True:
                 vel_y = jump_power
                 jump_count-=1
                 on_ground=False
+            
+            if event.key==pygame.K_s:
+                if not on_ground: #fast landing
+                    vel_y=18
+                    fast_land=True
+                else:
+                    slide_timer=slide_duration #slide
+                    target_x=slide_x
+                
 
     old_bottom = player_rect.bottom #last position
 
@@ -108,9 +122,9 @@ while True:
             x2=platform2["rect"].right+gap2
         
     if distance>=speed_up_every:
-        target_speed+=0.1
+        speed_goal+=0.1
         speed_up_every+=1000
-    if platform_speed<target_speed:
+    if platform_speed<speed_goal:
         platform_speed+=0.01 #smoothing the process of speeding up
 
     for platform in platforms:
@@ -122,6 +136,10 @@ while True:
                 vel_y=0
                 on_ground=True
                 jump_count=2
+                if fast_land: #little slide after landing
+                    slide_timer=int(slide_duration/1.5)
+                    target_x=450
+                    fast_land=False
             else:
                 player_rect.right=rect.left
                 touching_side=True
@@ -144,6 +162,10 @@ while True:
                 vel_y=0
                 on_ground=True
                 jump_count=2
+                if fast_land: #little slide after landing
+                    slide_timer=int(slide_duration/1.5)
+                    target_x=450
+                    fast_land=False
     platforms2=[platform2 for platform2 in platforms2 if platform2["rect"].right>0]
     
     if len(platforms2)>0:
@@ -153,13 +175,24 @@ while True:
             new_x2=last_platform2["rect"].right+gap2
             platforms2.append(create_platform2(new_x2))
 
+    if slide_timer>0:
+        slide_timer-=1
+    else:
+        if on_ground:
+            target_x=player_x
+
     if not touching_side:
-        if player_rect.x<player_x:
-            player_rect.x+=2
-            if player_rect.x > player_x:
-                player_rect.x=player_x
+        if player_rect.x<target_x:
+            player_rect.x+=4 #back to normal position
+            if player_rect.x > target_x:
+                player_rect.x=target_x
+        elif player_rect.x > target_x:
+            player_rect.x -= 4
+            if player_rect.x < target_x:
+                player_rect.x = target_x
 
     if player_rect.top>800:
+        fast_land=False
         print("Game Over")
         pygame.quit()
         sys.exit()
