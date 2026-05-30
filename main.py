@@ -4,7 +4,15 @@ import random
 
 pygame.init()
 
-screen = pygame.display.set_mode((1280, 720))
+GAME_W = 1280
+GAME_H = 720
+DISPLAY_SCALE = 0.8
+
+DISPLAY_W = int(GAME_W * DISPLAY_SCALE)
+DISPLAY_H = int(GAME_H * DISPLAY_SCALE)
+
+game_surface = pygame.Surface((GAME_W, GAME_H))
+screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H))
 pygame.display.set_caption("Real Sparkle?")
 clock = pygame.time.Clock()
 
@@ -14,13 +22,25 @@ player_x=400
 hp=3
 distance=0
 
-bg=pygame.Surface((1280,720)) #sky
-bg.fill('WHITE')
+font = pygame.font.Font(
+    "assets/PixelifySans-VariableFont_wght.ttf",
+    36
+)
+
+bg_star1 = pygame.image.load("assets/STAR1.png").convert()
+bg_star2 = pygame.image.load("assets/STAR2.png").convert()
+
+bg_star1=pygame.transform.scale(bg_star1, (1280, 720))
+bg_star2=pygame.transform.scale(bg_star2, (1280, 720))
+
+bg_star=[bg_star1,bg_star2]
+bg_star_index=0
+bg_timer=0
 
 def create_platform(x):
-    width=random.randint(400,800)
-    height=random.randint(300,500)
+    width=random.randint(350,650)
     y=random.randint(430, 620)
+    height=720-y
     gd_surf=pygame.Surface((width,height))
     gd_surf.fill('BLACK')
     gd_rect=gd_surf.get_rect(topleft=(x,y))
@@ -30,9 +50,9 @@ def create_platform(x):
     }
 
 def create_platform2(x): #upper-level platforms
-    width=random.randint(400,800)
-    height=random.randint(600,800)
-    y=random.randint(200, 360)
+    width=random.randint(280,520)
+    y=random.randint(120, 280)
+    height=720-y
     gd_surf=pygame.Surface((width,height))
     gd_surf.fill('GRAY')
     gd_rect=gd_surf.get_rect(topleft=(x,y))
@@ -73,8 +93,9 @@ jump_count=2
 
 on_ground=False
 
-platform_speed=5
-speed_goal=5
+platform_speed=6
+speed_goal=6
+max_speed=12
 speed_up_every=1000 #speed up
 
 slide_x=500 #slide distance
@@ -113,6 +134,13 @@ while True:
     
     distance+=platform_speed
 
+    bg_timer+=1
+    if bg_timer>=60:
+        bg_timer=0
+        bg_star_index+=1
+        if bg_star_index>=len(bg_star):
+            bg_star_index=0 #background
+
     if distance >3000 and len(platforms2)==0: #creat upper-level platforms
         x2=1400
         for i in range(5):
@@ -122,8 +150,10 @@ while True:
             x2=platform2["rect"].right+gap2
         
     if distance>=speed_up_every:
-        speed_goal+=0.1
+        speed_goal+=0.2
         speed_up_every+=1000
+    if speed_goal > max_speed:
+        speed_goal = max_speed#the maximum of speed
     if platform_speed<speed_goal:
         platform_speed+=0.01 #smoothing the process of speeding up
 
@@ -171,7 +201,7 @@ while True:
     if len(platforms2)>0:
         last_platform2 = platforms2[-1]
         if last_platform2["rect"].right<1280:
-            gap2=random.randint(120,320)
+            gap2=random.randint(260,500)
             new_x2=last_platform2["rect"].right+gap2
             platforms2.append(create_platform2(new_x2))
 
@@ -197,14 +227,34 @@ while True:
         pygame.quit()
         sys.exit()
 
-    screen.blit(bg,(0,0))
+    game_surface.blit(bg_star[bg_star_index],(0,0))
 
     for platform2 in platforms2:
-        screen.blit(platform2["surf"], platform2["rect"])
+        game_surface.blit(platform2["surf"], platform2["rect"])
     for platform in platforms:
-        screen.blit(platform["surf"], platform["rect"])
+        game_surface.blit(platform["surf"], platform["rect"])
     
-    screen.blit(player,player_rect)
+    game_surface.blit(player,player_rect)
 
+    distance_text = font.render(
+        f"DIST {int(distance*0.08)}",
+        False,
+        (220,220,230)
+    )
+
+    speed_text = font.render(
+        f"SPD {platform_speed:.1f}",
+        False,
+        (220,220,230)
+    )
+    
+    game_surface.blit(distance_text, (30, 20))
+    game_surface.blit(speed_text, (30, 55))
+
+    scaled_surface = pygame.transform.scale(
+    game_surface,
+    (DISPLAY_W, DISPLAY_H)
+    )
+    screen.blit(scaled_surface, (0, 0))
     pygame.display.update()
     clock.tick(60)
