@@ -11,6 +11,11 @@ A 2D pixel-style rooftop endless runner built with Python and Pygame.
 - Start screen
 - Pause state
 - Game over and retry flow
+- Short-press parry
+- Hold parry with bullet time
+- White drone with card missile attack
+- White drone with homing card attack
+- Black drone with danmaku area attack
 
 
 
