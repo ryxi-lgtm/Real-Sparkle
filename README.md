@@ -8,6 +8,9 @@ A 2D pixel-style rooftop endless runner built with Python and Pygame.
 - Fast-fall mechanics
 - Sliding movement system
 - Multi-layer rooftop environment
+- Start screen
+- Pause state
+- Game over and retry flow
 
 
 
