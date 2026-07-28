@@ -544,6 +544,17 @@ DRONE_BLACK = "black"
 
 DRONE_SPAWN_TIME = 360
 PLAYER_INVULN_TIME = 70
+BOSS_TRIGGER_DISTANCE = 31000
+BOSS_APPROACH_TIME = 70
+BOSS_BLINK_TIME = 28
+BOSS_SLAP_TIME = 42
+BOSS_TRANSITION_TIME = 75
+BOSS_PLAYER_SPEED = 7
+BOSS_FLOOR_Y = 610
+BOSS_APPROACH_FLOOR_Y = 600
+BOSS_APPROACH_PLATFORM_WIDTH = 20000
+BOSS_APPROACH_GAP = 260
+BOSS_CALM_RUN_TIME = 150
 DANMAKU_TOP = "top"
 DANMAKU_BOTTOM = "bottom"
 if supports_chinese_danmaku:
@@ -553,10 +564,13 @@ else:
 
 STATE_HOME = "home"
 STATE_RUNNING = "running"
+STATE_BOSS_TRANSITION = "boss_transition"
+STATE_BOSS = "boss"
 STATE_PAUSED = "paused"
 STATE_GAME_OVER = "game_over"
 
 game_state = STATE_HOME
+previous_game_state = STATE_RUNNING
 platforms=[]
 platforms2=[]
 player_rect = player.get_rect()
@@ -586,6 +600,14 @@ drone_spawn_timer=DRONE_SPAWN_TIME
 invuln_timer=0
 screen_shake_timer=0
 screen_shake_power=0
+boss_triggered=False
+boss_transition_timer=0
+boss_transition_phase="approach"
+boss_floor_rect=None
+boss_approach_platform=None
+boss_calm_timer=0
+transition_boss_rect=None
+space_key_down=False
 
 def has_reachable_upper_platform():
     for platform in platforms2:
@@ -612,6 +634,9 @@ def reset_game():
     global parry_cooldown_timer, parry_ring_timer, parry_ring_total, parry_kind
     global time_scale, drones, missiles, barrages, drone_spawn_timer, hp
     global invuln_timer, screen_shake_timer, screen_shake_power
+    global boss_triggered, boss_transition_timer, boss_floor_rect, previous_game_state
+    global boss_transition_phase, boss_approach_platform, boss_calm_timer
+    global transition_boss_rect, space_key_down
 
     platforms=[]
     platforms2=[]
@@ -660,6 +685,15 @@ def reset_game():
     invuln_timer=0
     screen_shake_timer=0
     screen_shake_power=0
+    boss_triggered=False
+    boss_transition_timer=0
+    boss_transition_phase="approach"
+    boss_floor_rect=None
+    boss_approach_platform=None
+    boss_calm_timer=0
+    previous_game_state=STATE_RUNNING
+    transition_boss_rect=None
+    space_key_down=False
 
 def start_parry_hold():
     global parry_state, parry_hold_timer
@@ -681,6 +715,20 @@ def release_parry_hold():
         trigger_parry("short")
     elif parry_state==PARRY_SLOWMO:
         trigger_parry("long")
+
+def sync_space_input():
+    global space_key_down
+
+    if game_state not in (STATE_RUNNING, STATE_BOSS):
+        space_key_down=False
+        return
+
+    pressed=pygame.key.get_pressed()[pygame.K_SPACE]
+    if pressed and not space_key_down:
+        start_parry_hold()
+    elif not pressed and space_key_down:
+        release_parry_hold()
+    space_key_down=pressed
 
 def cancel_parry():
     global parry_state, parry_hold_timer, parry_active_timer
@@ -710,7 +758,7 @@ def missile_near_player(missile, radius):
 def start_screen_shake(duration, power):
     global screen_shake_timer, screen_shake_power
 
-    if game_state!=STATE_RUNNING:
+    if game_state not in (STATE_RUNNING, STATE_BOSS):
         return
 
     if screen_shake_timer<=0 or duration>=screen_shake_timer:
@@ -723,6 +771,69 @@ def deflect_missile(missile, kind):
     missile.deflect()
     trigger_parry(kind)
     start_screen_shake(16, 12)
+
+def clear_enemy_attacks():
+    global drones, missiles, barrages
+
+    drones=[]
+    missiles=[]
+    barrages=[]
+
+def start_boss_approach():
+    global boss_triggered, drone_spawn_timer
+    global platforms, boss_approach_platform, boss_calm_timer
+
+    boss_triggered=True
+    boss_calm_timer=0
+    drone_spawn_timer=DRONE_SPAWN_TIME
+    clear_enemy_attacks()
+    if boss_approach_platform is None:
+        last_platform=platforms[-1]
+        start_x=last_platform.rect.right + BOSS_APPROACH_GAP
+        platform_y=BOSS_APPROACH_FLOOR_Y
+        approach_platform=Platform(start_x)
+        approach_platform.surf=pygame.Surface(
+            (BOSS_APPROACH_PLATFORM_WIDTH, GAME_H - platform_y)
+        )
+        approach_platform.surf.fill("BLACK")
+        approach_platform.rect=approach_platform.surf.get_rect(
+            topleft=(start_x, platform_y)
+        )
+        platforms.append(approach_platform)
+        boss_approach_platform=approach_platform
+
+def begin_boss_transition_on_platform():
+    global game_state, boss_transition_timer, boss_transition_phase, transition_boss_rect
+
+    clear_enemy_attacks()
+    cancel_parry()
+    clear_screen_shake()
+    boss_transition_timer=0
+    boss_transition_phase="blink"
+    boss_x=min(GAME_W - player_w - 60, player_rect.right + 90)
+    boss_y=player_rect.y
+    transition_boss_rect=pygame.Rect(boss_x, boss_y, player_w, player_h)
+    game_state=STATE_BOSS_TRANSITION
+
+def enter_boss_arena():
+    global game_state, platforms, platforms2, boss_floor_rect
+    global player_rect, vel_y, jump_count, on_ground, fast_land, slide_timer
+    global target_x, time_scale
+
+    clear_enemy_attacks()
+    platforms=[]
+    platforms2=[]
+    boss_floor_rect=pygame.Rect(0, BOSS_FLOOR_Y, GAME_W, GAME_H - BOSS_FLOOR_Y)
+    player_rect = player.get_rect(midbottom=(GAME_W // 2, boss_floor_rect.top))
+    vel_y=0
+    jump_count=2
+    on_ground=True
+    fast_land=False
+    slide_timer=0
+    target_x=player_rect.x
+    time_scale=1.0
+    clear_screen_shake()
+    game_state=STATE_BOSS
 
 def damage_player():
     global hp, invuln_timer, screen_shake_timer, screen_shake_power
@@ -861,7 +972,7 @@ def present_screen():
         (DISPLAY_W, DISPLAY_H)
     )
 
-    if game_state==STATE_RUNNING and screen_shake_timer>0:
+    if game_state in (STATE_RUNNING, STATE_BOSS) and screen_shake_timer>0:
         shake=int(screen_shake_power * screen_shake_timer / 14)
         offset_x=random.randint(-shake, shake)
         offset_y=random.randint(-shake, shake)
@@ -1012,7 +1123,10 @@ def draw_home():
     draw_center_text("W JUMP   S SLIDE / FAST FALL   P PAUSE", 425, 28, (180, 180, 195))
 
 def draw_pause():
-    draw_game()
+    if previous_game_state==STATE_BOSS:
+        draw_boss()
+    else:
+        draw_game()
     overlay = pygame.Surface((GAME_W, GAME_H), pygame.SRCALPHA)
     overlay.fill((0, 0, 0, 150))
     game_surface.blit(overlay, (0, 0))
@@ -1028,10 +1142,215 @@ def draw_game_over():
     draw_center_text(f"DIST {int(final_distance * 0.08)}", 370, 36)
     draw_center_text("R RETRY   ENTER HOME", 435, 30, (190, 190, 205))
 
+def draw_boss_arena_base():
+    game_surface.fill((0, 0, 0))
+    pygame.draw.rect(game_surface, (18, 18, 22), boss_floor_rect)
+    pygame.draw.rect(game_surface, (255, 80, 130), boss_floor_rect, 4)
+    pygame.draw.line(
+        game_surface,
+        (255, 210, 230),
+        (0, boss_floor_rect.top),
+        (GAME_W, boss_floor_rect.top),
+        5
+    )
+
+def draw_boss_player():
+    if parry_state==PARRY_ACTIVE:
+        player_color=(255, 225, 240)
+    elif parry_state==PARRY_SLOWMO:
+        player_color=(255, 120, 170)
+    elif invuln_timer>0 and invuln_timer % 8 < 4:
+        player_color=(255, 255, 255)
+    else:
+        player_color=(220, 35, 45)
+
+    player.fill(player_color)
+    game_surface.blit(player, player_rect)
+    draw_parry_effects()
+
+    if parry_state==PARRY_SLOWMO:
+        slowmo_overlay = pygame.Surface((GAME_W, GAME_H), pygame.SRCALPHA)
+        slowmo_overlay.fill((20, 10, 35, 75))
+        game_surface.blit(slowmo_overlay, (0, 0))
+
+def draw_boss_ui():
+    room_text = font.render("LIVE ROOM", False, (255, 185, 220))
+    hp_text = font.render(f"HP {hp}", False, (255, 170, 190))
+    game_surface.blit(room_text, (30, 20))
+    game_surface.blit(hp_text, (30, 55))
+
+def draw_boss():
+    draw_boss_arena_base()
+    draw_boss_player()
+    draw_boss_ui()
+
+def draw_boss_transition():
+    draw_game()
+    if boss_transition_phase=="approach":
+        draw_center_text("SIGNAL CONNECTING", 170, 34, (255, 190, 220))
+        return
+
+    if transition_boss_rect:
+        if boss_transition_phase!="blink" or int(boss_transition_timer / 4) % 2==0:
+            pygame.draw.rect(game_surface, (255, 105, 185), transition_boss_rect)
+            pygame.draw.rect(game_surface, (255, 235, 250), transition_boss_rect, 3)
+
+    if boss_transition_phase=="blink":
+        flash = pygame.Surface((GAME_W, GAME_H), pygame.SRCALPHA)
+        flash.fill((255, 190, 230, max(0, 90 - boss_transition_timer * 3)))
+        game_surface.blit(flash, (0, 0))
+        return
+
+    if boss_transition_phase=="slap":
+        progress=min(1, boss_transition_timer / BOSS_SLAP_TIME)
+        boss_center=transition_boss_rect.center if transition_boss_rect else (player_rect.right + 80, player_rect.centery)
+        board=pygame.Surface((230, 72), pygame.SRCALPHA)
+        pygame.draw.rect(board, (255, 245, 250), board.get_rect(), border_radius=6)
+        pygame.draw.rect(board, (255, 75, 130), board.get_rect(), 5, border_radius=6)
+        pygame.draw.line(board, (255, 75, 130), (25, 36), (205, 36), 4)
+        angle=45 - progress * 105
+        offset_x=90 - progress * 190
+        offset_y=-80 + progress * 60
+        rotated_board=pygame.transform.rotate(board, angle)
+        board_pos=(int(boss_center[0] + offset_x), int(boss_center[1] + offset_y))
+        game_surface.blit(rotated_board, rotated_board.get_rect(center=board_pos))
+        if progress>0.72:
+            hit_flash=pygame.Surface((GAME_W, GAME_H), pygame.SRCALPHA)
+            hit_flash.fill((255, 255, 255, int(120 * (progress - 0.72) / 0.28)))
+            game_surface.blit(hit_flash, (0, 0))
+        return
+
+    progress=min(1, boss_transition_timer / BOSS_TRANSITION_TIME)
+    overlay = pygame.Surface((GAME_W, GAME_H), pygame.SRCALPHA)
+    overlay.fill((255, 245, 255, int(35 + 120 * progress)))
+    game_surface.blit(overlay, (0, 0))
+
+    center=(GAME_W // 2, GAME_H // 2)
+    flash_radius=int(35 + 250 * progress)
+    pygame.draw.circle(game_surface, (255, 255, 255), center, flash_radius, 6)
+    pygame.draw.circle(game_surface, (255, 180, 220), center, max(12, flash_radius // 3), 4)
+
+    card_rect=pygame.Rect(0, 0, 150, 56)
+    card_rect.center=center
+    pygame.draw.rect(game_surface, (255, 255, 255), card_rect, border_radius=6)
+    pygame.draw.rect(game_surface, (255, 70, 110), card_rect, 4, border_radius=6)
+
+    crack_angles=[-165, -132, -96, -62, -28, 0, 35, 72, 112, 148]
+    for index, angle in enumerate(crack_angles):
+        direction=pygame.math.Vector2(1, 0).rotate(angle)
+        length=90 + progress * (260 + index * 18)
+        start=pygame.math.Vector2(center) + direction * 35
+        end=pygame.math.Vector2(center) + direction * length
+        pygame.draw.line(
+            game_surface,
+            (255, 255, 255),
+            (int(start.x), int(start.y)),
+            (int(end.x), int(end.y)),
+            3
+        )
+        shard=pygame.math.Vector2(-direction.y, direction.x) * (12 + index % 3 * 7)
+        pygame.draw.line(
+            game_surface,
+            (255, 160, 210),
+            (int(end.x), int(end.y)),
+            (int(end.x + shard.x), int(end.y + shard.y)),
+            2
+        )
+
+def update_boss_transition():
+    global boss_transition_timer, boss_transition_phase, transition_boss_rect
+    global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
+
+    boss_transition_timer+=1
+
+    if boss_transition_phase=="approach":
+        old_bottom=player_rect.bottom
+        vel_y+=gravity
+        player_rect.y+=vel_y
+        on_ground=False
+        for platform in platforms:
+            if player_rect.colliderect(platform.rect) and old_bottom<=platform.rect.top and vel_y>=0:
+                player_rect.bottom=platform.rect.top
+                vel_y=0
+                on_ground=True
+                jump_count=2
+                fast_land=False
+        if slide_timer>0:
+            slide_timer-=1
+        target_x=player_x
+        if player_rect.x<target_x:
+            player_rect.x=min(target_x, player_rect.x + 4)
+        elif player_rect.x>target_x:
+            player_rect.x=max(target_x, player_rect.x - 4)
+        if boss_transition_timer>=BOSS_APPROACH_TIME:
+            boss_transition_phase="blink"
+            boss_transition_timer=0
+            boss_x=min(GAME_W - player_w - 60, player_rect.right + 90)
+            boss_y=player_rect.y
+            transition_boss_rect=pygame.Rect(boss_x, boss_y, player_w, player_h)
+        return
+
+    if boss_transition_phase=="blink" and boss_transition_timer>=BOSS_BLINK_TIME:
+        boss_transition_phase="slap"
+        boss_transition_timer=0
+        return
+
+    if boss_transition_phase=="slap" and boss_transition_timer>=BOSS_SLAP_TIME:
+        boss_transition_phase="shatter"
+        boss_transition_timer=0
+        return
+
+    if boss_transition_phase=="shatter" and boss_transition_timer>=BOSS_TRANSITION_TIME:
+        enter_boss_arena()
+
+def update_boss():
+    global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
+    global bg_timer, bg_star_index, screen_shake_timer, invuln_timer
+
+    update_parry()
+    if invuln_timer>0:
+        invuln_timer=max(0, invuln_timer - 1)
+    if screen_shake_timer>0:
+        screen_shake_timer=max(0, screen_shake_timer - 1)
+
+    bg_timer+=time_scale
+    if bg_timer>=60:
+        bg_timer=0
+        bg_star_index+=1
+        if bg_star_index>=len(bg_star):
+            bg_star_index=0
+
+    keys=pygame.key.get_pressed()
+    if keys[pygame.K_a]:
+        player_rect.x-=BOSS_PLAYER_SPEED * time_scale
+    if keys[pygame.K_d]:
+        player_rect.x+=BOSS_PLAYER_SPEED * time_scale
+
+    vel_y += gravity * time_scale
+    player_rect.y += vel_y * time_scale
+    on_ground=False
+
+    if boss_floor_rect and player_rect.bottom>=boss_floor_rect.top:
+        player_rect.bottom=boss_floor_rect.top
+        vel_y=0
+        on_ground=True
+        jump_count=2
+        if fast_land:
+            slide_timer=int(slide_duration/1.5)
+            fast_land=False
+
+    if slide_timer>0:
+        slide_timer-=1
+
+    player_rect.left=max(0, player_rect.left)
+    player_rect.right=min(GAME_W, player_rect.right)
+    target_x=player_rect.x
+
 def update_game():
     global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
     global distance, bg_timer, bg_star_index, speed_goal, speed_up_every
     global platform_speed, platforms, platforms2, game_state, final_distance
+    global boss_triggered, boss_approach_platform, boss_calm_timer
 
     update_parry()
     old_bottom = player_rect.bottom #last position
@@ -1041,6 +1360,7 @@ def update_game():
     player_rect.y += vel_y * time_scale
     on_ground=False
     touching_side=False
+    on_boss_approach_platform=False
 
     distance+=scaled_speed
 
@@ -1051,7 +1371,7 @@ def update_game():
         if bg_star_index>=len(bg_star):
             bg_star_index=0 #background
 
-    if distance >3000 and len(platforms2)==0: #creat upper-level platforms
+    if not boss_triggered and distance >3000 and len(platforms2)==0: #creat upper-level platforms
         x2=1400
         for i in range(5):
             platform2 = Platform(x2, upper=True)
@@ -1076,6 +1396,8 @@ def update_game():
                 vel_y=0
                 on_ground=True
                 jump_count=2
+                if platform is boss_approach_platform:
+                    on_boss_approach_platform=True
                 if fast_land: #little slide after landing
                     slide_timer=int(slide_duration/1.5)
                     target_x=450
@@ -1088,7 +1410,7 @@ def update_game():
 
     last_platform = platforms[-1]
 
-    if last_platform.rect.right < 1280:
+    if not boss_triggered and last_platform.rect.right < 1280:
         gap=random.randint(200,320)
         new_x = last_platform.rect.right + gap
         platforms.append(Platform(new_x))
@@ -1108,7 +1430,7 @@ def update_game():
                     fast_land=False
     platforms2 = [platform2 for platform2 in platforms2 if platform2.rect.right > 0]
 
-    if len(platforms2)>0:
+    if not boss_triggered and len(platforms2)>0:
         last_platform2 = platforms2[-1]
         if last_platform2.rect.right < 1280:
             gap2=random.randint(260,500)
@@ -1131,7 +1453,20 @@ def update_game():
             if player_rect.x < target_x:
                 player_rect.x = target_x
 
-    update_enemy_system(time_scale)
+    if distance>=BOSS_TRIGGER_DISTANCE and not boss_triggered:
+        start_boss_approach()
+        return
+
+    if boss_triggered and on_boss_approach_platform:
+        boss_calm_timer+=1
+        if boss_calm_timer>=BOSS_CALM_RUN_TIME:
+            begin_boss_transition_on_platform()
+            return
+    elif boss_triggered:
+        boss_calm_timer=0
+
+    if not boss_triggered:
+        update_enemy_system(time_scale)
 
     if player_rect.top>800:
         fast_land=False
@@ -1152,15 +1487,19 @@ while True:
             if game_state==STATE_HOME:
                 if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     reset_game()
+                    space_key_down=event.key==pygame.K_SPACE
                     game_state=STATE_RUNNING
 
             elif game_state==STATE_RUNNING:
                 if event.key==pygame.K_p:
                     cancel_parry()
                     clear_screen_shake()
+                    space_key_down=False
+                    previous_game_state=game_state
                     game_state=STATE_PAUSED
                 elif event.key==pygame.K_SPACE:
                     start_parry_hold()
+                    space_key_down=True
                 elif event.key==pygame.K_w and jump_count > 0: #double jump
                     vel_y = jump_power
                     jump_count-=1
@@ -1173,15 +1512,37 @@ while True:
                         slide_timer=slide_duration #slide
                         target_x=slide_x
 
+            elif game_state==STATE_BOSS:
+                if event.key==pygame.K_p:
+                    cancel_parry()
+                    clear_screen_shake()
+                    space_key_down=False
+                    previous_game_state=game_state
+                    game_state=STATE_PAUSED
+                elif event.key==pygame.K_SPACE:
+                    start_parry_hold()
+                    space_key_down=True
+                elif event.key==pygame.K_w and jump_count > 0:
+                    vel_y = jump_power
+                    jump_count-=1
+                    on_ground=False
+                elif event.key==pygame.K_s:
+                    if not on_ground:
+                        vel_y=18
+                        fast_land=True
+                    else:
+                        slide_timer=slide_duration
+
             elif game_state==STATE_PAUSED:
                 if event.key==pygame.K_p:
-                    game_state=STATE_RUNNING
+                    game_state=previous_game_state
                 elif event.key==pygame.K_r:
                     reset_game()
                     game_state=STATE_RUNNING
                 elif event.key==pygame.K_ESCAPE:
                     cancel_parry()
                     clear_screen_shake()
+                    space_key_down=False
                     game_state=STATE_HOME
 
             elif game_state==STATE_GAME_OVER:
@@ -1192,12 +1553,21 @@ while True:
                     game_state=STATE_HOME
 
         if event.type==pygame.KEYUP:
-            if game_state==STATE_RUNNING and event.key==pygame.K_SPACE:
+            if game_state in (STATE_RUNNING, STATE_BOSS) and event.key==pygame.K_SPACE:
                 release_parry_hold()
+                space_key_down=False
+
+    sync_space_input()
 
     if game_state==STATE_RUNNING:
         update_game()
         draw_game()
+    elif game_state==STATE_BOSS_TRANSITION:
+        update_boss_transition()
+        draw_boss_transition()
+    elif game_state==STATE_BOSS:
+        update_boss()
+        draw_boss()
     elif game_state==STATE_HOME:
         draw_home()
     elif game_state==STATE_PAUSED:
