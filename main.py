@@ -86,6 +86,245 @@ class Platform:
     def draw(self, surface):
         surface.blit(self.surf, self.rect)
 
+class Boss:
+    def __init__(self, x, y):
+        self.base_x=x
+        self.base_y=y
+        self.x=x
+        self.y=y
+        self.width=70
+        self.height=70
+        self.velocity=pygame.math.Vector2(0, 0)
+        self.target_position=pygame.math.Vector2(x, y)
+        self.visible=True
+        self.current_state="idle"
+        self.facing_direction=-1
+        self.state_timer=60
+        self.float_timer=random.randint(0, 120)
+        self.float_amplitude=random.randint(3, 6)
+        self.teleport_timer=0
+        self.teleport_target=None
+        self.flash_timer=0
+        self.attack_flash_timer=0
+        self.attack_triggered=False
+        self.aim_start=(x, y)
+        self.locked_target=(player_rect.centerx, player_rect.centery)
+        self.aim_dir=(-1, 0)
+        self.sniper_card=None
+        self.hit_flash_timer=0
+
+    @property
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), self.width, self.height)
+
+    def sniper_stations(self):
+        floor_top=boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y
+        y=max(100, min(210, floor_top - self.height - 230))
+        return [
+            (150, y),
+            (GAME_W - 150 - self.width, y),
+        ]
+
+    def choose_sniper_station(self):
+        positions=self.sniper_stations()
+        choices=[
+            position for position in positions
+            if abs(position[0] - self.base_x)>20 or abs(position[1] - self.base_y)>20
+        ]
+        if not choices:
+            choices=positions
+        return random.choice(choices)
+
+    def update(self, dt):
+        self.float_timer+=dt
+        if self.flash_timer>0:
+            self.flash_timer=max(0, self.flash_timer - dt)
+        if self.attack_flash_timer>0:
+            self.attack_flash_timer=max(0, self.attack_flash_timer - dt)
+        if self.hit_flash_timer>0:
+            self.hit_flash_timer=max(0, self.hit_flash_timer - dt)
+
+        if self.teleport_timer>0:
+            self.teleport_timer=max(0, self.teleport_timer - dt)
+            self.visible=self.teleport_timer<=7
+            if self.teleport_timer<=7 and self.teleport_target:
+                self.base_x=self.teleport_target[0]
+                self.base_y=self.teleport_target[1]
+                self.x=self.base_x
+                self.y=self.base_y
+                self.target_position=pygame.math.Vector2(self.base_x, self.base_y)
+                self.flash_timer=14
+                self.teleport_target=None
+            if self.teleport_timer<=0:
+                self.visible=True
+                if self.current_state=="teleporting":
+                    self.current_state="windup"
+                    self.state_timer=60
+            return
+
+        self.velocity.update(0, 0)
+        self.x=self.base_x
+        self.y=self.base_y + self.float_amplitude * pygame.math.Vector2(0, 1).rotate(self.float_timer * 3).y
+
+        if self.current_state=="idle":
+            self.state_timer-=dt
+            if self.state_timer<=0:
+                target_x, target_y=self.choose_sniper_station()
+                self.attack_triggered=False
+                self.teleport(target_x, target_y)
+
+        elif self.current_state=="windup":
+            self.state_timer-=dt
+            if self.state_timer<=35:
+                self.update_aim(player_rect.center)
+            if self.state_timer<=0:
+                self.current_state="lock"
+                self.state_timer=18
+                self.update_aim(self.locked_target)
+                self.attack_triggered=False
+
+        elif self.current_state=="lock":
+            self.state_timer-=dt
+            if self.state_timer<=0:
+                self.current_state="attack"
+                self.state_timer=95
+                self.attack_triggered=False
+
+        elif self.current_state=="attack":
+            if not self.attack_triggered:
+                self.attack_triggered=True
+                self.attack_flash_timer=18
+                self.fire_sniper_card()
+            self.state_timer-=dt
+            card_done=(
+                self.sniper_card is None
+                or self.sniper_card.state=="dead"
+                or self.sniper_card.off_screen()
+            )
+            if self.state_timer<=0 or card_done:
+                self.current_state="recovery"
+                self.state_timer=30
+                self.sniper_card=None
+
+        elif self.current_state=="recovery":
+            self.state_timer-=dt
+            if self.state_timer<=0:
+                self.current_state="idle"
+                self.state_timer=60
+                self.attack_triggered=False
+
+        self.clamp_to_arena()
+
+    def update_aim(self, target):
+        self.aim_start=self.rect.center
+        self.locked_target=target
+        dx=target[0] - self.aim_start[0]
+        dy=target[1] - self.aim_start[1]
+        length=max(1, (dx * dx + dy * dy) ** 0.5)
+        self.aim_dir=(dx / length, dy / length)
+
+    def fire_sniper_card(self):
+        card=CardMissile(self.aim_start[0], self.aim_start[1], self.aim_dir[0], self.aim_dir[1])
+        card.speed=58
+        card.visual_w=150
+        card.visual_h=56
+        card.hit_w=162
+        card.hit_h=86
+        card.rect=pygame.Rect(card.x - card.hit_w / 2, card.y - card.hit_h / 2, card.hit_w, card.hit_h)
+        card.owner="boss"
+        self.sniper_card=card
+        missiles.append(card)
+
+    def on_sniper_reflected_hit(self):
+        self.hit_flash_timer=24
+        self.flash_timer=18
+        self.current_state="recovery"
+        self.state_timer=30
+        self.sniper_card=None
+
+    def clamp_to_arena(self):
+        margin=35
+        floor_top=boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y
+        self.x=max(margin, min(GAME_W - self.width - margin, self.x))
+        self.y=max(90, min(floor_top - self.height - 35, self.y))
+        self.base_x=max(margin, min(GAME_W - self.width - margin, self.base_x))
+        self.base_y=max(90, min(floor_top - self.height - 35, self.base_y))
+
+    def teleport(self, target_x, target_y):
+        margin=35
+        floor_top=boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y
+        target_x=max(margin, min(GAME_W - self.width - margin, target_x))
+        target_y=max(90, min(floor_top - self.height - 35, target_y))
+        self.teleport_target=(target_x, target_y)
+        self.teleport_timer=14
+        self.visible=False
+        self.current_state="teleporting"
+        self.state_timer=0
+
+    def draw(self, surface):
+        if self.flash_timer>0:
+            glow_rect=self.rect.inflate(36, 36)
+            pygame.draw.rect(surface, (255, 210, 245), glow_rect, 4, border_radius=8)
+
+        if self.current_state in ("windup", "lock"):
+            if self.current_state=="windup" and self.state_timer>35:
+                pass
+            else:
+                muzzle=(int(self.aim_start[0]), int(self.aim_start[1]))
+                target=(int(self.locked_target[0]), int(self.locked_target[1]))
+                line_color=(255, 45, 60) if self.current_state=="windup" else (255, 255, 255)
+                width=3 if self.current_state=="windup" else 5
+                dx=target[0] - muzzle[0]
+                dy=target[1] - muzzle[1]
+                ray_end=target
+                if dx!=0 or dy!=0:
+                    candidates=[]
+                    if dx<0:
+                        t=(0 - muzzle[0]) / dx
+                        candidates.append(t)
+                    elif dx>0:
+                        t=(GAME_W - muzzle[0]) / dx
+                        candidates.append(t)
+                    if dy<0:
+                        t=(0 - muzzle[1]) / dy
+                        candidates.append(t)
+                    elif dy>0:
+                        t=(GAME_H - muzzle[1]) / dy
+                        candidates.append(t)
+                    forward=[t for t in candidates if t>=1]
+                    if forward:
+                        t=min(forward)
+                        ray_end=(int(muzzle[0] + dx * t), int(muzzle[1] + dy * t))
+                pygame.draw.line(surface, line_color, muzzle, ray_end, width)
+                pygame.draw.circle(surface, line_color, target, 10, 2)
+
+        if not self.visible:
+            blink_radius=max(8, 28 - self.teleport_timer)
+            pygame.draw.circle(surface, (255, 150, 230), self.rect.center, blink_radius, 3)
+            return
+
+        rect=self.rect
+        if self.current_state=="windup":
+            pulse=1 + 0.08 * abs(pygame.math.Vector2(0, 1).rotate(self.float_timer * 9).y)
+            rect=pygame.Rect(0, 0, int(self.width * pulse), int(self.height * pulse))
+            rect.center=self.rect.center
+            pygame.draw.circle(surface, (255, 160, 230), self.rect.center, int(52 + 8 * pulse), 3)
+        elif self.current_state=="attack" and self.attack_flash_timer>0:
+            flash_rect=self.rect.inflate(80, 80)
+            pygame.draw.rect(surface, (255, 235, 255), flash_rect, 5, border_radius=12)
+        if self.hit_flash_timer>0:
+            hit_rect=rect.inflate(48, 48)
+            pygame.draw.rect(surface, (255, 255, 180), hit_rect, 5, border_radius=10)
+        pygame.draw.rect(surface, (255, 95, 190), rect, border_radius=8)
+        pygame.draw.rect(surface, (255, 230, 250), rect, 4, border_radius=8)
+        eye_y=rect.top + 26
+        if self.facing_direction<0:
+            eye_x=rect.left + 22
+        else:
+            eye_x=rect.right - 22
+        pygame.draw.circle(surface, (255, 255, 255), (eye_x, eye_y), 6)
+        pygame.draw.circle(surface, (90, 20, 60), (eye_x, eye_y), 3)
+
 class CardMissile:
     def __init__(self, x, y, dir_x=-1, dir_y=0):
         self.x=x
@@ -123,12 +362,18 @@ class CardMissile:
 
         self.rect.center=(int(self.x), int(self.y))
 
-    def deflect(self):
+    def deflect(self, target=None):
         self.state="deflected"
         self.flash_timer=16
         self.rotation=-20
         self.trail=[(self.x, self.y)]
-        self.deflect_dir=self.make_deflect_dir(self.dir_x, self.dir_y)
+        if target:
+            dx=target[0] - self.x
+            dy=target[1] - self.y
+            length=max(1, (dx * dx + dy * dy) ** 0.5)
+            self.deflect_dir=(dx / length, dy / length)
+        else:
+            self.deflect_dir=self.make_deflect_dir(self.dir_x, self.dir_y)
 
     def make_deflect_dir(self, in_x, in_y):
         out_x=-in_x
@@ -226,7 +471,7 @@ class HomingCard:
 
         self.rect.center=(int(self.x), int(self.y))
 
-    def deflect(self):
+    def deflect(self, target=None):
         self.state="deflected"
         self.flash_timer=18
         self.deflect_dir=self.make_deflect_dir(self.vel_x, self.vel_y)
@@ -407,7 +652,8 @@ class Drone:
                     self.phase="recover"
                     self.timer=0
                     return
-                self.resolve_snipe(False)
+                self.phase="recover"
+                self.timer=0
 
         elif self.phase=="recover":
             self.timer+=dt
@@ -545,6 +791,7 @@ DRONE_BLACK = "black"
 DRONE_SPAWN_TIME = 360
 PLAYER_INVULN_TIME = 70
 BOSS_TRIGGER_DISTANCE = 31000
+BOSS_ENEMY_STOP_DISTANCE = BOSS_TRIGGER_DISTANCE - 1800
 BOSS_APPROACH_TIME = 70
 BOSS_BLINK_TIME = 28
 BOSS_SLAP_TIME = 42
@@ -606,6 +853,7 @@ boss_transition_phase="approach"
 boss_floor_rect=None
 boss_approach_platform=None
 boss_calm_timer=0
+boss_instance=None
 transition_boss_rect=None
 space_key_down=False
 
@@ -636,7 +884,7 @@ def reset_game():
     global invuln_timer, screen_shake_timer, screen_shake_power
     global boss_triggered, boss_transition_timer, boss_floor_rect, previous_game_state
     global boss_transition_phase, boss_approach_platform, boss_calm_timer
-    global transition_boss_rect, space_key_down
+    global boss_instance, transition_boss_rect, space_key_down
 
     platforms=[]
     platforms2=[]
@@ -691,6 +939,7 @@ def reset_game():
     boss_floor_rect=None
     boss_approach_platform=None
     boss_calm_timer=0
+    boss_instance=None
     previous_game_state=STATE_RUNNING
     transition_boss_rect=None
     space_key_down=False
@@ -767,8 +1016,8 @@ def start_screen_shake(duration, power):
     else:
         screen_shake_power=max(screen_shake_power, power)
 
-def deflect_missile(missile, kind):
-    missile.deflect()
+def deflect_missile(missile, kind, target=None):
+    missile.deflect(target)
     trigger_parry(kind)
     start_screen_shake(16, 12)
 
@@ -778,6 +1027,9 @@ def clear_enemy_attacks():
     drones=[]
     missiles=[]
     barrages=[]
+
+def enemy_system_clear():
+    return len(drones)==0 and len(missiles)==0 and len(barrages)==0
 
 def start_boss_approach():
     global boss_triggered, drone_spawn_timer
@@ -818,13 +1070,16 @@ def begin_boss_transition_on_platform():
 def enter_boss_arena():
     global game_state, platforms, platforms2, boss_floor_rect
     global player_rect, vel_y, jump_count, on_ground, fast_land, slide_timer
-    global target_x, time_scale
+    global target_x, time_scale, boss_instance
 
     clear_enemy_attacks()
     platforms=[]
     platforms2=[]
     boss_floor_rect=pygame.Rect(0, BOSS_FLOOR_Y, GAME_W, GAME_H - BOSS_FLOOR_Y)
     player_rect = player.get_rect(midbottom=(GAME_W // 2, boss_floor_rect.top))
+    boss_x=min(GAME_W - 170, player_rect.right + 260)
+    boss_y=max(110, player_rect.top - 180)
+    boss_instance=Boss(boss_x, boss_y)
     vel_y=0
     jump_count=2
     on_ground=True
@@ -839,7 +1094,7 @@ def damage_player():
     global hp, invuln_timer, screen_shake_timer, screen_shake_power
     global game_state, final_distance
 
-    if invuln_timer>0 or game_state!=STATE_RUNNING:
+    if invuln_timer>0 or game_state not in (STATE_RUNNING, STATE_BOSS):
         return
 
     hp-=1
@@ -862,33 +1117,60 @@ def update_enemy_system(dt):
     if screen_shake_timer>0:
         screen_shake_timer=max(0, screen_shake_timer - 1)
 
-    if distance<=6000 or len(platforms2)==0:
-        return
+    can_spawn_enemies = (
+        distance>6000
+        and distance<BOSS_ENEMY_STOP_DISTANCE
+        and len(platforms2)>0
+    )
 
-    drone_spawn_timer-=dt
-    if drone_spawn_timer<=0 and len(drones)<1:
-        if len(barrages)==0:
-            kind=random.choice([DRONE_WHITE, DRONE_BLACK])
-        else:
-            kind=DRONE_WHITE
-        drones.append(Drone(kind))
-        drone_spawn_timer=random.randint(300, 460)
+    if can_spawn_enemies:
+        drone_spawn_timer-=dt
+        if drone_spawn_timer<=0 and len(drones)<1:
+            if len(barrages)==0:
+                kind=random.choice([DRONE_WHITE, DRONE_BLACK])
+            else:
+                kind=DRONE_WHITE
+            drones.append(Drone(kind))
+            drone_spawn_timer=random.randint(300, 460)
 
     for drone in drones:
         drone.update(dt)
     drones=[drone for drone in drones if drone.alive]
 
+    update_missiles(dt)
+
+    for barrage in barrages:
+        barrage.update(dt)
+        if barrage.hits_player():
+            damage_player()
+    barrages=[barrage for barrage in barrages if barrage.active()]
+
+def update_missiles(dt):
+    global missiles
+
     for missile in missiles:
         missile.update(dt)
+
+        if game_state==STATE_BOSS and boss_instance and getattr(missile, "owner", None)=="boss":
+            if missile.state=="deflected" and missile.rect.colliderect(boss_instance.rect):
+                missile.hit_player()
+                boss_instance.on_sniper_reflected_hit()
+                start_screen_shake(14, 10)
+                continue
+
         if missile.state!="flying":
             continue
 
+        deflect_target=None
+        if game_state==STATE_BOSS and boss_instance and getattr(missile, "owner", None)=="boss":
+            deflect_target=boss_instance.rect.center
+
         if is_parry_active() and missile_near_player(missile, PARRY_RADIUS):
-            deflect_missile(missile, parry_kind)
+            deflect_missile(missile, parry_kind, deflect_target)
             continue
 
         if parry_state in (PARRY_HOLDING, PARRY_SLOWMO) and missile_near_player(missile, PARRY_RADIUS+30):
-            deflect_missile(missile, "long")
+            deflect_missile(missile, "long", deflect_target)
             continue
 
         if missile.rect.colliderect(player_rect):
@@ -896,12 +1178,6 @@ def update_enemy_system(dt):
             missile.hit_player()
 
     missiles=[missile for missile in missiles if not missile.off_screen()]
-
-    for barrage in barrages:
-        barrage.update(dt)
-        if barrage.hits_player():
-            damage_player()
-    barrages=[barrage for barrage in barrages if barrage.active()]
 
 def trigger_parry(kind):
     global parry_state, parry_active_timer, parry_active_total
@@ -1179,8 +1455,28 @@ def draw_boss_ui():
     game_surface.blit(room_text, (30, 20))
     game_surface.blit(hp_text, (30, 55))
 
+    label_font = pygame.font.Font(
+        "assets/PixelifySans-VariableFont_wght.ttf",
+        28
+    )
+    name_label=label_font.render("Sparkle?", False, (255, 235, 245))
+    game_surface.blit(name_label, (GAME_W // 2 - 315, 33))
+
+    bar_w=520
+    hp_rect=pygame.Rect(GAME_W // 2 - 135, 45, bar_w, 24)
+    toughness_rect=pygame.Rect(hp_rect.left, hp_rect.top - 9, bar_w, 6)
+    pygame.draw.rect(game_surface, (38, 8, 20), hp_rect, border_radius=3)
+    pygame.draw.rect(game_surface, (230, 35, 80), hp_rect, border_radius=3)
+    pygame.draw.rect(game_surface, (255, 190, 210), hp_rect, 2, border_radius=3)
+    pygame.draw.rect(game_surface, (210, 210, 230), toughness_rect, border_radius=2)
+    pygame.draw.rect(game_surface, (255, 255, 255), toughness_rect, 1, border_radius=2)
+
 def draw_boss():
     draw_boss_arena_base()
+    if boss_instance:
+        boss_instance.draw(game_surface)
+    for missile in missiles:
+        missile.draw(game_surface)
     draw_boss_player()
     draw_boss_ui()
 
@@ -1320,6 +1616,9 @@ def update_boss():
         if bg_star_index>=len(bg_star):
             bg_star_index=0
 
+    if boss_instance:
+        boss_instance.update(time_scale)
+
     keys=pygame.key.get_pressed()
     if keys[pygame.K_a]:
         player_rect.x-=BOSS_PLAYER_SPEED * time_scale
@@ -1345,6 +1644,7 @@ def update_boss():
     player_rect.left=max(0, player_rect.left)
     player_rect.right=min(GAME_W, player_rect.right)
     target_x=player_rect.x
+    update_missiles(time_scale)
 
 def update_game():
     global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
@@ -1453,7 +1753,7 @@ def update_game():
             if player_rect.x < target_x:
                 player_rect.x = target_x
 
-    if distance>=BOSS_TRIGGER_DISTANCE and not boss_triggered:
+    if distance>=BOSS_TRIGGER_DISTANCE and not boss_triggered and enemy_system_clear():
         start_boss_approach()
         return
 
@@ -1485,7 +1785,10 @@ while True:
 
         if event.type==pygame.KEYDOWN:
             if game_state==STATE_HOME:
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                if event.key in (pygame.K_LCTRL, pygame.K_RCTRL):
+                    reset_game()
+                    enter_boss_arena()
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     reset_game()
                     space_key_down=event.key==pygame.K_SPACE
                     game_state=STATE_RUNNING
