@@ -107,10 +107,18 @@ class Boss:
         self.flash_timer=0
         self.attack_flash_timer=0
         self.attack_triggered=False
+        self.current_skill="sniper"
         self.aim_start=(x, y)
         self.locked_target=(player_rect.centerx, player_rect.centery)
         self.aim_dir=(-1, 0)
         self.sniper_card=None
+        self.homing_cards=[]
+        self.homing_cards_fired=0
+        self.homing_fire_timer=0
+        self.homing_projectile_count=2
+        self.last_homing_station_key=None
+        self.block_warning=None
+        self.active_block_drop=None
         self.hit_flash_timer=0
 
     @property
@@ -134,6 +142,35 @@ class Boss:
         if not choices:
             choices=positions
         return random.choice(choices)
+
+    def homing_stations(self):
+        floor_top=boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y
+        top_y=max(95, min(180, floor_top - self.height - 265))
+        mid_y=max(210, min(330, floor_top - self.height - 150))
+        return [
+            ("left_top", 120, top_y),
+            ("right_top", GAME_W - self.width - 120, top_y),
+            ("center_top", GAME_W // 2 - self.width // 2, top_y - 10),
+            ("left_mid", 95, mid_y),
+            ("right_mid", GAME_W - self.width - 95, mid_y),
+        ]
+
+    def choose_homing_station(self):
+        positions=self.homing_stations()
+        choices=[position for position in positions if position[0]!=self.last_homing_station_key]
+        if not choices:
+            choices=positions
+        key, x, y=random.choice(choices)
+        self.last_homing_station_key=key
+        return x, y
+
+    def block_drop_station(self):
+        floor_top=boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y
+        y=max(95, min(180, floor_top - self.height - 260))
+        return (GAME_W // 2 - self.width // 2, y)
+
+    def choose_next_skill(self):
+        self.current_skill=random.choice(["sniper", "homing", "block_drop"])
 
     def update(self, dt):
         self.float_timer+=dt
@@ -160,6 +197,14 @@ class Boss:
                 if self.current_state=="teleporting":
                     self.current_state="windup"
                     self.state_timer=60
+                    self.homing_cards=[]
+                    self.homing_cards_fired=0
+                    self.homing_fire_timer=0
+                    self.homing_projectile_count=random.randint(2, 3)
+                    self.block_warning=None
+                    self.active_block_drop=None
+                    if self.current_skill=="block_drop":
+                        self.prepare_block_drop()
             return
 
         self.velocity.update(0, 0)
@@ -169,18 +214,35 @@ class Boss:
         if self.current_state=="idle":
             self.state_timer-=dt
             if self.state_timer<=0:
-                target_x, target_y=self.choose_sniper_station()
+                self.choose_next_skill()
+                if self.current_skill=="block_drop":
+                    target_x, target_y=self.block_drop_station()
+                elif self.current_skill=="homing":
+                    target_x, target_y=self.choose_homing_station()
+                else:
+                    target_x, target_y=self.choose_sniper_station()
                 self.attack_triggered=False
                 self.teleport(target_x, target_y)
 
         elif self.current_state=="windup":
             self.state_timer-=dt
-            if self.state_timer<=35:
+            if self.current_skill=="sniper" and self.state_timer<=35:
                 self.update_aim(player_rect.center)
             if self.state_timer<=0:
-                self.current_state="lock"
-                self.state_timer=18
-                self.update_aim(self.locked_target)
+                if self.current_skill=="block_drop":
+                    self.current_state="attack"
+                    self.state_timer=1
+                    self.attack_triggered=False
+                elif self.current_skill=="homing":
+                    self.current_state="attack"
+                    self.state_timer=1
+                    self.homing_cards=[]
+                    self.homing_cards_fired=0
+                    self.homing_fire_timer=0
+                else:
+                    self.current_state="lock"
+                    self.state_timer=18
+                    self.update_aim(self.locked_target)
                 self.attack_triggered=False
 
         elif self.current_state=="lock":
@@ -191,20 +253,25 @@ class Boss:
                 self.attack_triggered=False
 
         elif self.current_state=="attack":
-            if not self.attack_triggered:
-                self.attack_triggered=True
-                self.attack_flash_timer=18
-                self.fire_sniper_card()
-            self.state_timer-=dt
-            card_done=(
-                self.sniper_card is None
-                or self.sniper_card.state=="dead"
-                or self.sniper_card.off_screen()
-            )
-            if self.state_timer<=0 or card_done:
-                self.current_state="recovery"
-                self.state_timer=30
-                self.sniper_card=None
+            if self.current_skill=="block_drop":
+                self.update_block_drop_attack(dt)
+            elif self.current_skill=="homing":
+                self.update_homing_attack(dt)
+            else:
+                if not self.attack_triggered:
+                    self.attack_triggered=True
+                    self.attack_flash_timer=18
+                    self.fire_sniper_card()
+                self.state_timer-=dt
+                card_done=(
+                    self.sniper_card is None
+                    or self.sniper_card.state=="dead"
+                    or self.sniper_card.off_screen()
+                )
+                if self.state_timer<=0 or card_done:
+                    self.current_state="recovery"
+                    self.state_timer=30
+                    self.sniper_card=None
 
         elif self.current_state=="recovery":
             self.state_timer-=dt
@@ -225,7 +292,7 @@ class Boss:
 
     def fire_sniper_card(self):
         card=CardMissile(self.aim_start[0], self.aim_start[1], self.aim_dir[0], self.aim_dir[1])
-        card.speed=58
+        card.speed=BOSS_SNIPER_CARD_SPEED
         card.visual_w=150
         card.visual_h=56
         card.hit_w=162
@@ -235,12 +302,72 @@ class Boss:
         self.sniper_card=card
         missiles.append(card)
 
+    def fire_homing_card(self):
+        offsets=[(-46, 8), (46, 8), (0, -34)]
+        offset_x, offset_y=offsets[self.homing_cards_fired % len(offsets)]
+        spawn_x=max(60, min(GAME_W - 60, self.rect.centerx + offset_x))
+        spawn_y=max(80, min((boss_floor_rect.top if boss_floor_rect else BOSS_FLOOR_Y) - 80, self.rect.centery + offset_y))
+        card=HomingCard(spawn_x, spawn_y)
+        card.owner="boss"
+        card.speed=10.5
+        self.homing_cards.append(card)
+        missiles.append(card)
+        self.attack_flash_timer=12
+
+    def update_homing_attack(self, dt):
+        if self.homing_cards_fired==0:
+            self.fire_homing_card()
+            self.homing_cards_fired=1
+            self.homing_fire_timer=BOSS_HOMING_FIRE_GAP
+        elif self.homing_cards_fired<self.homing_projectile_count:
+            self.homing_fire_timer-=dt
+            if self.homing_fire_timer<=0:
+                self.fire_homing_card()
+                self.homing_cards_fired+=1
+                self.homing_fire_timer=BOSS_HOMING_FIRE_GAP
+
+        active_cards=[
+            card for card in self.homing_cards
+            if card.state!="dead" and not card.off_screen()
+        ]
+        self.homing_cards=active_cards
+        if self.homing_cards_fired>=self.homing_projectile_count and len(self.homing_cards)==0:
+            self.current_state="recovery"
+            self.state_timer=30
+
+    def prepare_block_drop(self):
+        spec=choose_block_drop_spec()
+        self.block_warning=BossBlockWarning(spec)
+
+    def update_block_drop_attack(self, dt):
+        if not self.attack_triggered:
+            self.attack_triggered=True
+            self.attack_flash_timer=18
+            if self.block_warning is None:
+                self.prepare_block_drop()
+            drop=BossBlockDrop(self.block_warning.spec)
+            self.block_warning=None
+            self.active_block_drop=drop
+            boss_block_drops.append(drop)
+
+        if self.active_block_drop and self.active_block_drop.settled:
+            self.current_state="recovery"
+            self.state_timer=30
+            self.active_block_drop=None
+            self.block_warning=None
+
     def on_sniper_reflected_hit(self):
         self.hit_flash_timer=24
         self.flash_timer=18
         self.current_state="recovery"
         self.state_timer=30
         self.sniper_card=None
+
+    def on_homing_reflected_hit(self, card):
+        self.hit_flash_timer=18
+        self.flash_timer=12
+        if card in self.homing_cards:
+            self.homing_cards.remove(card)
 
     def clamp_to_arena(self):
         margin=35
@@ -269,7 +396,7 @@ class Boss:
         if self.current_state in ("windup", "lock"):
             if self.current_state=="windup" and self.state_timer>35:
                 pass
-            else:
+            elif self.current_skill=="sniper":
                 muzzle=(int(self.aim_start[0]), int(self.aim_start[1]))
                 target=(int(self.locked_target[0]), int(self.locked_target[1]))
                 line_color=(255, 45, 60) if self.current_state=="windup" else (255, 255, 255)
@@ -309,6 +436,11 @@ class Boss:
             rect=pygame.Rect(0, 0, int(self.width * pulse), int(self.height * pulse))
             rect.center=self.rect.center
             pygame.draw.circle(surface, (255, 160, 230), self.rect.center, int(52 + 8 * pulse), 3)
+            if self.current_skill=="homing":
+                self.draw_homing_charge_cards(surface)
+            elif self.current_skill=="block_drop":
+                radius=int(68 + 10 * abs(pygame.math.Vector2(0, 1).rotate(self.float_timer * 8).y))
+                pygame.draw.circle(surface, (255, 220, 90), self.rect.center, radius, 3)
         elif self.current_state=="attack" and self.attack_flash_timer>0:
             flash_rect=self.rect.inflate(80, 80)
             pygame.draw.rect(surface, (255, 235, 255), flash_rect, 5, border_radius=12)
@@ -324,6 +456,23 @@ class Boss:
             eye_x=rect.right - 22
         pygame.draw.circle(surface, (255, 255, 255), (eye_x, eye_y), 6)
         pygame.draw.circle(surface, (90, 20, 60), (eye_x, eye_y), 3)
+
+    def draw_homing_charge_cards(self, surface):
+        offsets=[(-72, 0), (72, 0)]
+        if self.homing_projectile_count>=3:
+            offsets=[(-72, 10), (72, 10), (0, -58)]
+
+        for index, (offset_x, offset_y) in enumerate(offsets):
+            card_surface=pygame.Surface((54, 28), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, (255, 235, 250), card_surface.get_rect(), border_radius=5)
+            pygame.draw.rect(card_surface, (180, 80, 255), card_surface.get_rect(), 3, border_radius=5)
+            pygame.draw.circle(card_surface, (180, 80, 255), (17, 14), 4)
+            pygame.draw.circle(card_surface, (180, 80, 255), (37, 14), 4)
+            spin_direction=-1 if index % 2==0 else 1
+            angle=self.float_timer * 12 * spin_direction + index * 12
+            rotated=pygame.transform.rotate(card_surface, angle)
+            center=(self.rect.centerx + offset_x, self.rect.centery + offset_y)
+            surface.blit(rotated, rotated.get_rect(center=center))
 
 class CardMissile:
     def __init__(self, x, y, dir_x=-1, dir_y=0):
@@ -474,7 +623,13 @@ class HomingCard:
     def deflect(self, target=None):
         self.state="deflected"
         self.flash_timer=18
-        self.deflect_dir=self.make_deflect_dir(self.vel_x, self.vel_y)
+        if target:
+            dx=target[0] - self.x
+            dy=target[1] - self.y
+            length=max(1, (dx * dx + dy * dy) ** 0.5)
+            self.deflect_dir=(dx / length, dy / length)
+        else:
+            self.deflect_dir=self.make_deflect_dir(self.vel_x, self.vel_y)
 
     def make_deflect_dir(self, in_x, in_y):
         out_x=-in_x
@@ -514,6 +669,550 @@ class HomingCard:
         if self.flash_timer>0:
             flash_rect=self.rect.inflate(34, 34)
             pygame.draw.rect(surface, (255, 255, 180), flash_rect, 3, border_radius=8)
+
+class BossBlockWarning:
+    def __init__(self, spec):
+        self.spec=spec
+        self.shape=spec["shape"]
+
+    @property
+    def rect(self):
+        return piece_rect_at(self.spec, self.spec["target_row"]).inflate(8, 12)
+
+    def draw(self, surface):
+        color=(255, 210, 80)
+        for col, row in piece_absolute_cells(self.spec, self.spec["target_row"]):
+            rect=grid_cell_rect(col, row)
+            warning=pygame.Rect(rect.x, BOSS_FLOOR_Y - 12, rect.width, 16)
+            pygame.draw.rect(surface, color, warning, 3, border_radius=4)
+            pygame.draw.line(surface, (255, 245, 170), warning.midleft, warning.midright, 3)
+        rect=self.rect
+        shape_label=font.render(self.shape, False, (255, 235, 150))
+        surface.blit(shape_label, shape_label.get_rect(midbottom=(rect.centerx, rect.top - 8)))
+
+class BossBlock:
+    def __init__(self, shape, col, row):
+        self.shape=shape
+        self.col=col
+        self.row=row
+        self.rect=grid_cell_rect(col, row)
+
+    def draw(self, surface):
+        draw_boss_block_cell(surface, self.shape, self.rect)
+
+class BossBlockDrop:
+    gravity=0.75
+
+    def __init__(self, spec):
+        self.spec=spec
+        self.shape=spec["shape"]
+        self.cells=spec["cells"]
+        self.col=spec["col"]
+        self.target_row=spec["target_row"]
+        self.width, self.height=piece_pixel_size(self.cells)
+        self.x=grid_x(self.col)
+        self.y=-self.height - 20
+        self.target_y=piece_top_y(self.cells, self.target_row)
+        self.rect=pygame.Rect(int(self.x), int(self.y), self.width, self.height)
+        self.vel_y=0
+        self.settled=False
+        self.hit_player=False
+        self.player_hit_this_frame=False
+
+    def update(self, dt):
+        self.player_hit_this_frame=False
+        if self.settled:
+            return
+
+        self.vel_y+=self.gravity * dt
+        self.y+=self.vel_y * dt
+        self.rect.y=int(self.y)
+        if any(rect.colliderect(player_rect) for rect in self.cell_rects()):
+            self.player_hit_this_frame=True
+        if self.y>=self.target_y:
+            self.y=self.target_y
+            self.rect.y=int(self.y)
+            self.settle()
+
+    def settle(self):
+        self.settled=True
+        record_boss_piece(self.shape)
+        for col, row in piece_absolute_cells(self.spec, self.target_row):
+            if 0<=col<BOSS_GRID_COLS and row>=0:
+                boss_block_grid[(col, row)]=self.shape
+        rebuild_boss_blocks_from_grid()
+        if any(block.rect.colliderect(player_rect) for block in boss_blocks):
+            push_player_out_of_blocks()
+        schedule_full_row_clears()
+        start_screen_shake(8, 5)
+
+    def hits_player(self):
+        return (
+            not self.hit_player
+            and self.player_hit_this_frame
+        )
+
+    def draw(self, surface):
+        for rect in self.cell_rects():
+            draw_boss_block_cell(surface, self.shape, rect)
+
+    def cell_rects(self):
+        max_row=max(row for _, row in self.cells)
+        rects=[]
+        for col_offset, row_offset in self.cells:
+            x=self.x + col_offset * BOSS_BLOCK_CELL
+            y=self.y + (max_row - row_offset) * BOSS_BLOCK_CELL
+            rects.append(pygame.Rect(int(x), int(y), BOSS_BLOCK_CELL, BOSS_BLOCK_CELL))
+        return rects
+
+def draw_boss_block_cell(surface, shape, rect):
+    if shape=="I":
+        color=(90, 220, 255)
+    elif shape=="T":
+        color=(190, 120, 255)
+    elif shape=="L":
+        color=(255, 155, 80)
+    elif shape=="S":
+        color=(110, 235, 145)
+    else:
+        color=(255, 215, 80)
+    border=(255, 250, 210)
+    pygame.draw.rect(surface, (25, 20, 28), rect.move(5, 5), border_radius=5)
+    pygame.draw.rect(surface, color, rect, border_radius=4)
+    pygame.draw.rect(surface, border, rect, 3, border_radius=4)
+
+def block_shape_options():
+    return {
+        "I": [
+            [(0, 0), (1, 0), (2, 0), (3, 0)],
+            [(0, 0), (0, 1), (0, 2), (0, 3)],
+        ],
+        "O": [
+            [(0, 0), (1, 0), (0, 1), (1, 1)],
+        ],
+        "T": [
+            [(0, 0), (1, 0), (2, 0), (1, 1)],
+            [(0, 0), (0, 1), (0, 2), (1, 1)],
+            [(1, 0), (0, 1), (1, 1), (2, 1)],
+            [(1, 0), (0, 1), (1, 1), (1, 2)],
+        ],
+        "L": [
+            [(0, 0), (1, 0), (2, 0), (0, 1)],
+            [(0, 0), (1, 0), (1, 1), (1, 2)],
+            [(2, 0), (0, 1), (1, 1), (2, 1)],
+            [(0, 0), (0, 1), (0, 2), (1, 2)],
+        ],
+        "S": [
+            [(1, 0), (2, 0), (0, 1), (1, 1)],
+            [(0, 0), (0, 1), (1, 1), (1, 2)],
+        ],
+    }
+
+def grid_x(col):
+    return BOSS_GRID_X + col * BOSS_BLOCK_CELL
+
+def grid_cell_rect(col, row):
+    return pygame.Rect(
+        grid_x(col),
+        BOSS_FLOOR_Y - (row + 1) * BOSS_BLOCK_CELL,
+        BOSS_BLOCK_CELL,
+        BOSS_BLOCK_CELL
+    )
+
+def piece_pixel_size(cells):
+    max_col=max(col for col, _ in cells)
+    max_row=max(row for _, row in cells)
+    return ((max_col + 1) * BOSS_BLOCK_CELL, (max_row + 1) * BOSS_BLOCK_CELL)
+
+def piece_top_y(cells, row):
+    max_row=max(local_row for _, local_row in cells)
+    return BOSS_FLOOR_Y - (row + max_row + 1) * BOSS_BLOCK_CELL
+
+def piece_rect_at(spec, row):
+    width, height=piece_pixel_size(spec["cells"])
+    return pygame.Rect(grid_x(spec["col"]), piece_top_y(spec["cells"], row), width, height)
+
+def piece_absolute_cells(spec, row):
+    return [(spec["col"] + col, row + local_row) for col, local_row in spec["cells"]]
+
+def can_place_piece(cells, col, row):
+    return can_place_piece_on_grid(boss_block_grid, cells, col, row)
+
+def can_place_piece_on_grid(grid, cells, col, row):
+    for local_col, local_row in cells:
+        grid_col=col + local_col
+        grid_row=row + local_row
+        if grid_col<0 or grid_col>=BOSS_GRID_COLS or grid_row<0:
+            return False
+        if (grid_col, grid_row) in grid:
+            return False
+    return True
+
+def landing_row_for_piece(cells, col):
+    return landing_row_for_piece_on_grid(boss_block_grid, cells, col)
+
+def landing_row_for_piece_on_grid(grid, cells, col):
+    row=BOSS_GRID_ROWS
+    while can_place_piece_on_grid(grid, cells, col, row - 1):
+        row-=1
+    if not can_place_piece_on_grid(grid, cells, col, row):
+        return None
+    return row
+
+def build_piece_spec(shape, cells, col):
+    return build_piece_spec_for_grid(boss_block_grid, shape, cells, col)
+
+def build_piece_spec_for_grid(grid, shape, cells, col):
+    row=landing_row_for_piece_on_grid(grid, cells, col)
+    if row is None:
+        return None
+    return {
+        "shape": shape,
+        "cells": cells,
+        "col": col,
+        "target_row": row,
+    }
+
+def boss_stack_height():
+    if not boss_block_grid:
+        return 0
+    return max(row for _, row in boss_block_grid.keys()) + 1
+
+def choose_block_drop_spec():
+    global boss_block_clear_plan
+
+    if boss_block_clear_plan:
+        next_spec=boss_block_clear_plan.pop(0)
+        refreshed=build_piece_spec(next_spec["shape"], next_spec["cells"], next_spec["col"])
+        if (
+            refreshed
+            and refreshed["target_row"]==next_spec["target_row"]
+            and not would_repeat_piece(refreshed["shape"], boss_piece_history)
+        ):
+            return refreshed
+        boss_block_clear_plan=[]
+
+    plan=find_clear_plan()
+    if plan:
+        boss_block_clear_plan=plan[1:]
+        return plan[0]
+
+    return choose_best_single_block_spec()
+
+def choose_best_single_block_spec():
+    forced=boss_stack_height()>=BOSS_FORCED_CLEAR_HEIGHT
+    candidates=enumerate_block_drop_candidates(boss_block_grid)
+    if not candidates:
+        return fallback_piece_spec()
+    scored=[score_block_candidate(spec, forced) for spec in candidates]
+    scored.sort(key=lambda entry: entry[0], reverse=True)
+    pool=scored[:max(1, min(3, len(scored)))]
+    return random.choice(pool)[1]["spec"]
+
+def enumerate_block_drop_candidates(grid, avoid_player=False, history=None):
+    if history is None:
+        history=boss_piece_history
+    options=[]
+    shapes=block_shape_options()
+    for shape, orientations in shapes.items():
+        if would_repeat_piece(shape, history):
+            continue
+        for cells in orientations:
+            max_col=max(col for col, _ in cells)
+            for col in range(0, BOSS_GRID_COLS - max_col):
+                spec=build_piece_spec_for_grid(grid, shape, cells, col)
+                if not spec:
+                    continue
+                if avoid_player and piece_would_trap_player(spec):
+                    continue
+                options.append(spec)
+    return options
+
+def fallback_piece_spec():
+    shapes=block_shape_options()
+    for shape, orientations in shapes.items():
+        if would_repeat_piece(shape, boss_piece_history):
+            continue
+        cells=orientations[0]
+        max_col=max(col for col, _ in cells)
+        for col in range(0, BOSS_GRID_COLS - max_col):
+            spec=build_piece_spec(shape, cells, col)
+            if spec:
+                return spec
+    cells=shapes["O"][0]
+    return {
+        "shape": "O",
+        "cells": cells,
+        "col": max(0, min(BOSS_GRID_COLS - 2, BOSS_GRID_COLS // 2)),
+        "target_row": 0,
+    }
+
+def score_block_candidate(spec, forced):
+    grid_after=simulate_grid_after_piece_on_grid(boss_block_grid, spec)
+    full_rows=count_full_rows(grid_after)
+    cleared_grid=grid_after_after_clears(grid_after)
+    heights=column_heights(cleared_grid)
+    holes=count_grid_holes(cleared_grid, heights)
+    bump=grid_bumpiness(heights)
+    max_height=max(heights) if heights else 0
+    total_height=sum(heights)
+    progress=row_progress_score(cleared_grid)
+    placed_height=spec["target_row"] + max(row for _, row in spec["cells"]) + 1
+
+    score=0
+    score+=full_rows * (2400 if forced else 1800)
+    score+=progress * (34 if forced else 42)
+    score-=holes * (180 if forced else 210)
+    score-=bump * (8 if forced else 10)
+    score-=max_height * (24 if forced else 28)
+    score-=total_height * (2 if forced else 3)
+    score-=max(0, placed_height - BOSS_FORCED_CLEAR_HEIGHT) * 45
+    score-=abs(piece_rect_at(spec, spec["target_row"]).centerx - player_rect.centerx) * 0.015
+    return score, {
+        "spec": spec,
+        "cleared_rows": full_rows,
+        "height": max_height,
+        "holes": holes,
+        "bumpiness": bump,
+    }
+
+def piece_would_trap_player(spec):
+    rect=piece_rect_at(spec, spec["target_row"])
+    if rect.colliderect(player_rect.inflate(30, 12)):
+        return True
+    occupied_cols={col for col, _ in piece_absolute_cells(spec, spec["target_row"])}
+    if len(occupied_cols)<=1:
+        col=list(occupied_cols)[0]
+        column_height=sum(1 for existing_col, _ in boss_block_grid if existing_col==col)
+        if column_height>=4:
+            return True
+    return False
+
+def simulate_grid_after_piece(spec):
+    return simulate_grid_after_piece_on_grid(boss_block_grid, spec)
+
+def simulate_grid_after_piece_on_grid(grid, spec):
+    grid=dict(grid)
+    for col, row in piece_absolute_cells(spec, spec["target_row"]):
+        if 0<=col<BOSS_GRID_COLS and row>=0:
+            grid[(col, row)]=spec["shape"]
+    return grid
+
+def count_full_rows(grid):
+    if not grid:
+        return 0
+    max_row=max(row for _, row in grid.keys())
+    return sum(
+        1 for row in range(max_row + 1)
+        if all((col, row) in grid for col in range(BOSS_GRID_COLS))
+    )
+
+def grid_after_after_clears(grid):
+    if not grid:
+        return {}
+    max_row=max(row for _, row in grid.keys())
+    full_rows={
+        row for row in range(max_row + 1)
+        if all((col, row) in grid for col in range(BOSS_GRID_COLS))
+    }
+    if not full_rows:
+        return grid
+    new_grid={}
+    for (col, row), value in grid.items():
+        if row in full_rows:
+            continue
+        drop=sum(1 for cleared_row in full_rows if cleared_row<row)
+        new_grid[(col, row - drop)]=value
+    return new_grid
+
+def column_heights(grid):
+    heights=[]
+    for col in range(BOSS_GRID_COLS):
+        rows=[row for grid_col, row in grid if grid_col==col]
+        heights.append(max(rows) + 1 if rows else 0)
+    return heights
+
+def count_grid_holes(grid, heights):
+    holes=0
+    for col, height in enumerate(heights):
+        for row in range(height):
+            if (col, row) not in grid:
+                holes+=1
+    return holes
+
+def grid_bumpiness(heights):
+    return sum(abs(heights[index] - heights[index + 1]) for index in range(len(heights) - 1))
+
+def row_progress_score(grid):
+    if not grid:
+        return 0
+    max_row=max(row for _, row in grid.keys())
+    score=0
+    for row in range(max_row + 1):
+        fill=row_fill_count_in_grid(grid, row)
+        if fill<BOSS_GRID_COLS:
+            score+=fill * fill
+    return score
+
+def row_fill_count_in_grid(grid, row):
+    return sum(1 for col in range(BOSS_GRID_COLS) if (col, row) in grid)
+
+def find_clear_plan():
+    initial_grid=dict(boss_block_grid)
+    initial_history=list(boss_piece_history)
+    beam=[(initial_grid, [], initial_history, evaluate_plan_grid(initial_grid))]
+
+    for depth in range(1, BOSS_CLEAR_PLAN_MAX_DEPTH + 1):
+        next_beam=[]
+        clear_plans=[]
+        for grid, sequence, history, _ in beam:
+            candidates=enumerate_block_drop_candidates(grid, history=history)
+            scored=[]
+            for spec in candidates:
+                after_place=simulate_grid_after_piece_on_grid(grid, spec)
+                clear_count=count_full_rows(after_place)
+                after_clear=grid_after_after_clears(after_place)
+                new_sequence=sequence + [spec]
+                new_history=updated_piece_history(history, spec["shape"])
+                if clear_count>0:
+                    score=score_clear_plan(after_clear, new_sequence, clear_count)
+                    clear_plans.append((score, new_sequence))
+                else:
+                    score=score_future_setup(after_clear, depth)
+                    scored.append((score, after_clear, new_sequence, new_history))
+            scored.sort(key=lambda entry: entry[0], reverse=True)
+            for score, after_clear, new_sequence, new_history in scored[:BOSS_CLEAR_PLAN_BEAM_WIDTH]:
+                next_beam.append((after_clear, new_sequence, new_history, score))
+
+        if clear_plans:
+            clear_plans.sort(key=lambda entry: entry[0], reverse=True)
+            pool=clear_plans[:max(1, min(3, len(clear_plans)))]
+            return random.choice(pool)[1]
+
+        next_beam.sort(key=lambda entry: entry[3], reverse=True)
+        beam=next_beam[:BOSS_CLEAR_PLAN_BEAM_WIDTH]
+        if not beam:
+            break
+
+    return None
+
+def evaluate_plan_grid(grid):
+    heights=column_heights(grid)
+    holes=count_grid_holes(grid, heights)
+    max_height=max(heights) if heights else 0
+    return (
+        row_progress_score(grid) * 34
+        - holes * 190
+        - grid_bumpiness(heights) * 8
+        - max_height * 24
+        - sum(heights) * 2
+    )
+
+def score_future_setup(grid, depth):
+    score=evaluate_plan_grid(grid)
+    score+=near_clear_bonus(grid) * 90
+    score-=depth * 18
+    if max(column_heights(grid) or [0])>=BOSS_FORCED_CLEAR_HEIGHT:
+        score+=near_clear_bonus(grid) * 140
+    return score
+
+def score_clear_plan(grid_after_clear, sequence, clear_count):
+    heights=column_heights(grid_after_clear)
+    holes=count_grid_holes(grid_after_clear, heights)
+    max_height=max(heights) if heights else 0
+    return (
+        clear_count * 12000
+        - len(sequence) * 1800
+        - holes * 180
+        - max_height * 65
+        - grid_bumpiness(heights) * 8
+        + row_progress_score(grid_after_clear) * 10
+    )
+
+def near_clear_bonus(grid):
+    if not grid:
+        return 0
+    max_row=max(row for _, row in grid.keys())
+    bonus=0
+    for row in range(max_row + 1):
+        fill=row_fill_count_in_grid(grid, row)
+        if fill<BOSS_GRID_COLS:
+            missing=BOSS_GRID_COLS - fill
+            if missing<=4:
+                bonus+=(5 - missing) * (5 - missing)
+            bonus+=fill
+    return bonus
+
+def row_fill_count(row):
+    return sum(1 for col in range(BOSS_GRID_COLS) if (col, row) in boss_block_grid)
+
+def would_repeat_piece(shape, history):
+    return len(history)>=1 and history[-1]==shape
+
+def updated_piece_history(history, shape):
+    return (history + [shape])[-1:]
+
+def record_boss_piece(shape):
+    global boss_piece_history
+    boss_piece_history=updated_piece_history(boss_piece_history, shape)
+
+def schedule_full_row_clears():
+    global boss_clear_flash_rows, boss_block_clear_plan
+    full_rows=[
+        row for row in range(BOSS_GRID_ROWS)
+        if all((col, row) in boss_block_grid for col in range(BOSS_GRID_COLS))
+    ]
+    if full_rows:
+        boss_block_clear_plan=[]
+    for row in full_rows:
+        boss_clear_flash_rows[row]=BOSS_ROW_CLEAR_FLASH_TIME
+
+def update_boss_row_clears(dt):
+    global boss_clear_flash_rows
+    if not boss_clear_flash_rows:
+        return
+    finished=[]
+    for row in list(boss_clear_flash_rows.keys()):
+        boss_clear_flash_rows[row]-=dt
+        if boss_clear_flash_rows[row]<=0:
+            finished.append(row)
+    if finished:
+        clear_grid_rows(sorted(finished))
+        for row in finished:
+            boss_clear_flash_rows.pop(row, None)
+        push_player_out_of_blocks()
+
+def clear_grid_rows(rows):
+    rows=set(rows)
+    old_items=list(boss_block_grid.items())
+    boss_block_grid.clear()
+    for (col, row), value in old_items:
+        if row in rows:
+            continue
+        drop=sum(1 for cleared_row in rows if cleared_row<row)
+        boss_block_grid[(col, row - drop)]=value
+    rebuild_boss_blocks_from_grid()
+    start_screen_shake(10, 6)
+
+def rebuild_boss_blocks_from_grid():
+    global boss_blocks
+    boss_blocks=[
+        BossBlock(shape, col, row)
+        for (col, row), shape in boss_block_grid.items()
+    ]
+
+def push_player_out_of_blocks():
+    for _ in range(8):
+        colliding=[block for block in boss_blocks if player_rect.colliderect(block.rect)]
+        if not colliding:
+            return
+        nearest=min(colliding, key=lambda block: abs(player_rect.bottom - block.rect.top))
+        if player_rect.centery<=nearest.rect.centery:
+            player_rect.bottom=nearest.rect.top
+        elif player_rect.centerx<nearest.rect.centerx:
+            player_rect.right=nearest.rect.left
+        else:
+            player_rect.left=nearest.rect.right
 
 class DanmakuLine:
     def __init__(self, text, x, y, speed):
@@ -797,11 +1496,24 @@ BOSS_BLINK_TIME = 28
 BOSS_SLAP_TIME = 42
 BOSS_TRANSITION_TIME = 75
 BOSS_PLAYER_SPEED = 7
+BOSS_SLIDE_TIME = 14
+BOSS_FAST_LAND_SLIDE_TIME = 10
+BOSS_SLIDE_SPEED = 11
 BOSS_FLOOR_Y = 610
 BOSS_APPROACH_FLOOR_Y = 600
 BOSS_APPROACH_PLATFORM_WIDTH = 20000
 BOSS_APPROACH_GAP = 260
 BOSS_CALM_RUN_TIME = 150
+BOSS_SNIPER_CARD_SPEED = 21
+BOSS_HOMING_FIRE_GAP = 30
+BOSS_GRID_COLS = 16
+BOSS_BLOCK_CELL = GAME_W // BOSS_GRID_COLS
+BOSS_GRID_ROWS = 10
+BOSS_GRID_X = 0
+BOSS_FORCED_CLEAR_HEIGHT = 5
+BOSS_ROW_CLEAR_FLASH_TIME = 18
+BOSS_CLEAR_PLAN_MAX_DEPTH = 4
+BOSS_CLEAR_PLAN_BEAM_WIDTH = 18
 DANMAKU_TOP = "top"
 DANMAKU_BOTTOM = "bottom"
 if supports_chinese_danmaku:
@@ -839,6 +1551,7 @@ parry_cooldown_timer=0
 parry_ring_timer=0
 parry_ring_total=1
 parry_kind="short"
+parry_used=False
 time_scale=1.0
 drones=[]
 missiles=[]
@@ -854,8 +1567,17 @@ boss_floor_rect=None
 boss_approach_platform=None
 boss_calm_timer=0
 boss_instance=None
+boss_blocks=[]
+boss_block_drops=[]
+boss_block_grid={}
+boss_clear_flash_rows={}
+boss_block_clear_plan=[]
+boss_piece_history=[]
 transition_boss_rect=None
 space_key_down=False
+last_move_direction=1
+boss_slide_timer=0
+boss_slide_direction=1
 
 def has_reachable_upper_platform():
     for platform in platforms2:
@@ -880,11 +1602,15 @@ def reset_game():
     global fast_land, distance, bg_star_index, bg_timer, final_distance
     global parry_state, parry_hold_timer, parry_active_timer, parry_active_total
     global parry_cooldown_timer, parry_ring_timer, parry_ring_total, parry_kind
+    global parry_used
     global time_scale, drones, missiles, barrages, drone_spawn_timer, hp
     global invuln_timer, screen_shake_timer, screen_shake_power
     global boss_triggered, boss_transition_timer, boss_floor_rect, previous_game_state
     global boss_transition_phase, boss_approach_platform, boss_calm_timer
-    global boss_instance, transition_boss_rect, space_key_down
+    global boss_instance, boss_blocks, boss_block_drops, boss_block_grid
+    global boss_clear_flash_rows, boss_block_clear_plan, boss_piece_history
+    global transition_boss_rect, space_key_down
+    global last_move_direction, boss_slide_timer, boss_slide_direction
 
     platforms=[]
     platforms2=[]
@@ -927,6 +1653,7 @@ def reset_game():
     parry_ring_timer=0
     parry_ring_total=1
     parry_kind="short"
+    parry_used=False
     time_scale=1.0
     drone_spawn_timer=220
     hp=3
@@ -940,21 +1667,31 @@ def reset_game():
     boss_approach_platform=None
     boss_calm_timer=0
     boss_instance=None
+    boss_blocks=[]
+    boss_block_drops=[]
+    boss_block_grid={}
+    boss_clear_flash_rows={}
+    boss_block_clear_plan=[]
+    boss_piece_history=[]
     previous_game_state=STATE_RUNNING
     transition_boss_rect=None
     space_key_down=False
+    last_move_direction=1
+    boss_slide_timer=0
+    boss_slide_direction=1
 
 def start_parry_hold():
-    global parry_state, parry_hold_timer
+    global parry_state, parry_hold_timer, parry_used
 
     if try_snipe_timing_parry():
         return
 
-    if parry_state!=PARRY_READY:
+    if parry_state not in (PARRY_READY, PARRY_ACTIVE):
         return
 
     parry_state=PARRY_HOLDING
     parry_hold_timer=0
+    parry_used=False
 
 def try_snipe_timing_parry():
     return False
@@ -981,13 +1718,14 @@ def sync_space_input():
 
 def cancel_parry():
     global parry_state, parry_hold_timer, parry_active_timer
-    global parry_cooldown_timer, parry_ring_timer, time_scale
+    global parry_cooldown_timer, parry_ring_timer, time_scale, parry_used
 
     parry_state=PARRY_READY
     parry_hold_timer=0
     parry_active_timer=0
     parry_cooldown_timer=0
     parry_ring_timer=0
+    parry_used=False
     time_scale=1.0
 
 def clear_screen_shake():
@@ -997,7 +1735,7 @@ def clear_screen_shake():
     screen_shake_power=0
 
 def is_parry_active():
-    return parry_state==PARRY_ACTIVE and parry_active_timer>0
+    return parry_state==PARRY_ACTIVE and parry_active_timer>0 and not parry_used
 
 def missile_near_player(missile, radius):
     dx=missile.rect.centerx - player_rect.centerx
@@ -1017,16 +1755,20 @@ def start_screen_shake(duration, power):
         screen_shake_power=max(screen_shake_power, power)
 
 def deflect_missile(missile, kind, target=None):
+    global parry_used
+
     missile.deflect(target)
     trigger_parry(kind)
+    parry_used=True
     start_screen_shake(16, 12)
 
 def clear_enemy_attacks():
-    global drones, missiles, barrages
+    global drones, missiles, barrages, boss_block_drops
 
     drones=[]
     missiles=[]
     barrages=[]
+    boss_block_drops=[]
 
 def enemy_system_clear():
     return len(drones)==0 and len(missiles)==0 and len(barrages)==0
@@ -1071,10 +1813,19 @@ def enter_boss_arena():
     global game_state, platforms, platforms2, boss_floor_rect
     global player_rect, vel_y, jump_count, on_ground, fast_land, slide_timer
     global target_x, time_scale, boss_instance
+    global last_move_direction, boss_slide_timer, boss_slide_direction
+    global boss_blocks, boss_block_drops, boss_block_grid, boss_clear_flash_rows
+    global boss_block_clear_plan, boss_piece_history
 
     clear_enemy_attacks()
     platforms=[]
     platforms2=[]
+    boss_blocks=[]
+    boss_block_drops=[]
+    boss_block_grid={}
+    boss_clear_flash_rows={}
+    boss_block_clear_plan=[]
+    boss_piece_history=[]
     boss_floor_rect=pygame.Rect(0, BOSS_FLOOR_Y, GAME_W, GAME_H - BOSS_FLOOR_Y)
     player_rect = player.get_rect(midbottom=(GAME_W // 2, boss_floor_rect.top))
     boss_x=min(GAME_W - 170, player_rect.right + 260)
@@ -1086,6 +1837,9 @@ def enter_boss_arena():
     fast_land=False
     slide_timer=0
     target_x=player_rect.x
+    last_move_direction=1
+    boss_slide_timer=0
+    boss_slide_direction=1
     time_scale=1.0
     clear_screen_shake()
     game_state=STATE_BOSS
@@ -1154,7 +1908,10 @@ def update_missiles(dt):
         if game_state==STATE_BOSS and boss_instance and getattr(missile, "owner", None)=="boss":
             if missile.state=="deflected" and missile.rect.colliderect(boss_instance.rect):
                 missile.hit_player()
-                boss_instance.on_sniper_reflected_hit()
+                if isinstance(missile, HomingCard):
+                    boss_instance.on_homing_reflected_hit(missile)
+                else:
+                    boss_instance.on_sniper_reflected_hit()
                 start_screen_shake(14, 10)
                 continue
 
@@ -1179,12 +1936,24 @@ def update_missiles(dt):
 
     missiles=[missile for missile in missiles if not missile.off_screen()]
 
+def update_boss_block_drops(dt):
+    global boss_block_drops
+
+    for drop in boss_block_drops:
+        drop.update(dt)
+        if drop.hits_player():
+            drop.hit_player=True
+            damage_player()
+    boss_block_drops=[drop for drop in boss_block_drops if not drop.settled]
+    update_boss_row_clears(dt)
+
 def trigger_parry(kind):
     global parry_state, parry_active_timer, parry_active_total
     global parry_cooldown_timer, parry_ring_timer, parry_ring_total
-    global parry_kind, time_scale
+    global parry_kind, time_scale, parry_used
 
     parry_kind=kind
+    parry_used=False
     if kind=="long":
         parry_active_total=PARRY_LONG_ACTIVE_TIME
         parry_ring_total=PARRY_LONG_ACTIVE_TIME
@@ -1473,8 +2242,19 @@ def draw_boss_ui():
 
 def draw_boss():
     draw_boss_arena_base()
+    for block in boss_blocks:
+        block.draw(game_surface)
+    for row, timer in boss_clear_flash_rows.items():
+        if int(timer / 3) % 2==0:
+            flash_rect=pygame.Rect(BOSS_GRID_X, grid_cell_rect(0, row).y, BOSS_GRID_COLS * BOSS_BLOCK_CELL, BOSS_BLOCK_CELL)
+            pygame.draw.rect(game_surface, (255, 255, 210), flash_rect, 4, border_radius=4)
     if boss_instance:
         boss_instance.draw(game_surface)
+    if boss_instance and boss_instance.block_warning and boss_instance.current_skill=="block_drop":
+        if boss_instance.current_state in ("windup", "attack"):
+            boss_instance.block_warning.draw(game_surface)
+    for drop in boss_block_drops:
+        drop.draw(game_surface)
     for missile in missiles:
         missile.draw(game_surface)
     draw_boss_player()
@@ -1602,6 +2382,7 @@ def update_boss_transition():
 def update_boss():
     global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
     global bg_timer, bg_star_index, screen_shake_timer, invuln_timer
+    global last_move_direction, boss_slide_timer, boss_slide_direction
 
     update_parry()
     if invuln_timer>0:
@@ -1620,14 +2401,50 @@ def update_boss():
         boss_instance.update(time_scale)
 
     keys=pygame.key.get_pressed()
-    if keys[pygame.K_a]:
-        player_rect.x-=BOSS_PLAYER_SPEED * time_scale
-    if keys[pygame.K_d]:
-        player_rect.x+=BOSS_PLAYER_SPEED * time_scale
+    old_rect=player_rect.copy()
+    if boss_slide_timer>0:
+        player_rect.x+=boss_slide_direction * BOSS_SLIDE_SPEED * time_scale
+        boss_slide_timer=max(0, boss_slide_timer - time_scale)
+    else:
+        if keys[pygame.K_a]:
+            player_rect.x-=BOSS_PLAYER_SPEED * time_scale
+            last_move_direction=-1
+        if keys[pygame.K_d]:
+            player_rect.x+=BOSS_PLAYER_SPEED * time_scale
+            last_move_direction=1
 
+    for block in boss_blocks:
+        if player_rect.colliderect(block.rect):
+            if old_rect.right<=block.rect.left:
+                player_rect.right=block.rect.left
+            elif old_rect.left>=block.rect.right:
+                player_rect.left=block.rect.right
+
+    old_bottom=player_rect.bottom
+    old_top=player_rect.top
     vel_y += gravity * time_scale
     player_rect.y += vel_y * time_scale
     on_ground=False
+
+    for block in boss_blocks:
+        if player_rect.colliderect(block.rect):
+            if old_bottom<=block.rect.top and vel_y>=0:
+                player_rect.bottom=block.rect.top
+                vel_y=0
+                on_ground=True
+                jump_count=2
+                if fast_land:
+                    if keys[pygame.K_a]:
+                        boss_slide_direction=-1
+                    elif keys[pygame.K_d]:
+                        boss_slide_direction=1
+                    else:
+                        boss_slide_direction=last_move_direction
+                    boss_slide_timer=BOSS_FAST_LAND_SLIDE_TIME
+                    fast_land=False
+            elif old_top>=block.rect.bottom and vel_y<0:
+                player_rect.top=block.rect.bottom
+                vel_y=0
 
     if boss_floor_rect and player_rect.bottom>=boss_floor_rect.top:
         player_rect.bottom=boss_floor_rect.top
@@ -1635,16 +2452,20 @@ def update_boss():
         on_ground=True
         jump_count=2
         if fast_land:
-            slide_timer=int(slide_duration/1.5)
+            if keys[pygame.K_a]:
+                boss_slide_direction=-1
+            elif keys[pygame.K_d]:
+                boss_slide_direction=1
+            else:
+                boss_slide_direction=last_move_direction
+            boss_slide_timer=BOSS_FAST_LAND_SLIDE_TIME
             fast_land=False
-
-    if slide_timer>0:
-        slide_timer-=1
 
     player_rect.left=max(0, player_rect.left)
     player_rect.right=min(GAME_W, player_rect.right)
     target_x=player_rect.x
     update_missiles(time_scale)
+    update_boss_block_drops(time_scale)
 
 def update_game():
     global vel_y, on_ground, jump_count, fast_land, slide_timer, target_x
@@ -1834,7 +2655,14 @@ while True:
                         vel_y=18
                         fast_land=True
                     else:
-                        slide_timer=slide_duration
+                        keys=pygame.key.get_pressed()
+                        if keys[pygame.K_a]:
+                            boss_slide_direction=-1
+                        elif keys[pygame.K_d]:
+                            boss_slide_direction=1
+                        else:
+                            boss_slide_direction=last_move_direction
+                        boss_slide_timer=BOSS_SLIDE_TIME
 
             elif game_state==STATE_PAUSED:
                 if event.key==pygame.K_p:
